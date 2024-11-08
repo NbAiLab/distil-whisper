@@ -729,6 +729,10 @@ def main():
         batch["labels"] = tokenizer(input_str, max_length=max_label_length, truncation=True).input_ids
         return batch
 
+    def rename_id_column(batch):
+        batch["original_id"] = batch.pop("id")
+        return batch
+
     raw_datasets_features = list(next(iter(raw_datasets.values())).features.keys())
     file_ids_dataset = IterableDatasetDict() if data_args.streaming else DatasetDict()
     for split in raw_datasets:
@@ -738,9 +742,12 @@ def main():
             vectorized_datasets = raw_datasets.map(prepare_dataset, remove_columns=raw_datasets_features)
     else:
         with accelerator.main_process_first():
+            # Rename id to original_id
+            raw_datasets = raw_datasets.map(rename_id_column)
+            # Vecotrize dataset, and keep all columns from original
             vectorized_datasets = raw_datasets.map(
                 prepare_dataset,
-                remove_columns=raw_datasets_features,
+                # remove_columns=raw_datasets_features,
                 num_proc=num_workers,
                 desc="preprocess dataset",
             )

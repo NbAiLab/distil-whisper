@@ -509,7 +509,6 @@ def main():
                 streaming=data_args.streaming,
                 num_proc=data_args.preprocessing_num_workers if not data_args.streaming else None,
             )
-
     if data_args.audio_column_name not in next(iter(raw_datasets.values())).column_names:
         raise ValueError(
             f"--audio_column_name '{data_args.audio_column_name}' not found in dataset"
@@ -719,9 +718,14 @@ def main():
         inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
         # process audio length
         batch[model_input_name] = inputs.get(model_input_name)[0]
+        
+        # Determine the correct nospeech token (note: it was "<|nocaptions|>" before Large v3, and then it changed to "<|nospeech|>")
+        nospeech_token = "<|nospeech|>" if len(tokenizer("<|nospeech|>").input_ids) == 1 else "<|nocaptions|>"
 
         # process targets
         input_str = batch[text_column_name]
+        if not input_str.strip() or input_str.strip() in ["<|nocaptions|>", "<|nospeech|>"]:
+            input_str = nospeech_token  # If empty or incorrect, replace with the correct nospeech token
         batch["labels"] = tokenizer(input_str, max_length=max_label_length, truncation=True).input_ids
         return batch
 
@@ -770,7 +774,7 @@ def main():
             else:
                 repo_name = training_args.hub_model_id
             create_repo(repo_name, repo_type="dataset", exist_ok=True, token=training_args.hub_token)
-            snapshot_download(repo_id=repo_name, repo_type="dataset", local_dir=output_dir)
+            snapshot_download(repo_id=repo_name, repo_type="dataset", local_dir=output_dir, token=training_args.hub_token)
 
             # Ensure large txt files can be pushed to the Hub with git-lfs
             with open(os.path.join(output_dir, ".gitattributes"), "r+") as f:
@@ -788,28 +792,42 @@ def main():
     metric = evaluate.load("wer")
 
     def compute_metrics(preds, labels, file_ids):
-        # replace padded labels by the padding token
+        # Replace padded labels by the padding token
         for idx in range(len(labels)):
             labels[idx][labels[idx] == -100] = tokenizer.pad_token_id
 
+        # Decode predictions and labels
         pred_str = tokenizer.batch_decode(preds, skip_special_tokens=False, decode_with_timestamps=return_timestamps)
-        # we do not want to group tokens when computing the metrics
         label_str = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-        # normalize everything and re-compute the WER
-        norm_pred_str = [normalizer(pred) for pred in pred_str]
-        norm_label_str = [normalizer(label) for label in label_str]
-        # for logging, we need the pred/labels to match the norm_pred/norm_labels, so discard any filtered samples here
-        pred_str = [pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0]
-        label_str = [label_str[i] for i in range(len(norm_label_str)) if len(norm_label_str[i]) > 0]
-        file_ids = [file_ids[i] for i in range(len(file_ids)) if len(norm_label_str[i]) > 0]
-        # filtering step to only evaluate the samples that correspond to non-zero normalized references:
-        norm_pred_str = [norm_pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0]
-        norm_label_str = [norm_label_str[i] for i in range(len(norm_label_str)) if len(norm_label_str[i]) > 0]
+        # Normalize everything
+        norm_pred_str = []
+        norm_label_str = []
 
+        # Iterate through all predictions and labels
+        for pred, label in zip(pred_str, label_str):
+            # Normalize the prediction and label
+            normalized_pred = normalizer(pred)
+            normalized_label = normalizer(label)
+
+            # If either normalized string is empty after normalization, replace with "<|nocaptions|>"
+            if not normalized_pred.strip():
+                normalized_pred = "<|nocaptions|>"
+            if not normalized_label.strip():
+                normalized_label = "<|nocaptions|>"
+
+            norm_pred_str.append(normalized_pred)
+            norm_label_str.append(normalized_label)
+
+        # Replace original strings with "<|nocaptions|>" where necessary for consistency
+        pred_str = [pred if len(pred.strip()) > 0 else "<|nocaptions|>" for pred in pred_str]
+        label_str = [label if len(label.strip()) > 0 else "<|nocaptions|>" for label in label_str]
+
+        # Compute WER using all entries, including those with "<|nocaptions|>"
         wer = 100 * metric.compute(predictions=norm_pred_str, references=norm_label_str)
 
         return {"wer": wer}, pred_str, label_str, norm_pred_str, norm_label_str, file_ids
+ 
 
     def filter_eot_tokens(preds):
         for idx in range(len(preds)):
@@ -920,6 +938,7 @@ def main():
                         folder_path=output_dir,
                         repo_id=repo_name,
                         repo_type="dataset",
+                        token=training_args.hub_token,
                         commit_message=f"Saving transcriptions for split {split} step {step}.",
                     )
 
@@ -1008,12 +1027,16 @@ def main():
                 folder_path=output_dir,
                 repo_id=repo_name,
                 repo_type="dataset",
+                token=training_args.hub_token,
                 commit_message=f"Saving final transcriptions for split {split.replace('.', '-').split('/')[-1]}",
             )
     if not data_args.streaming and accelerator.is_main_process:
         raw_datasets.save_to_disk(output_dir, num_proc=num_workers)
+        if not data_args.dataset_config_name:
+            data_args.dataset_config_name = "no" 
+
         if training_args.push_to_hub:
-            raw_datasets.push_to_hub(repo_name, config_name=data_args.dataset_config_name)
+            raw_datasets.push_to_hub(repo_name, token=training_args.hub_token, config_name=data_args.dataset_config_name)
     accelerator.end_training()
 
 

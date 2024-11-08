@@ -670,9 +670,10 @@ def main():
         batch["condition_on_prev"] = condition_on_prev
 
         return batch
-
     raw_datasets_features = list(next(iter(raw_datasets.values())).features.keys())
+    
     if data_args.concatenate_audio and not data_args.streaming:
+        print("im inside where I should not be...")
         with accelerator.main_process_first():
             raw_datasets = raw_datasets.map(
                 concatenate_dataset,
@@ -711,7 +712,7 @@ def main():
             "Streaming mode is not yet compatible with concatenating audios to `max_duration_in_seconds`."
             "Either set `--streaming=False` and download the audios locally, or open an issue on the Distil-Whisper repo to request this feature."
         )
-
+    
     def prepare_dataset(batch):
         # process audio
         sample = batch[audio_column_name]
@@ -729,21 +730,23 @@ def main():
         batch["labels"] = tokenizer(input_str, max_length=max_label_length, truncation=True).input_ids
         return batch
 
-    def rename_id_column(batch):
-        batch["original_id"] = batch.pop("id")
-        return batch
+    #def rename_id_column(batch):
+    #    batch["original_id"] = batch.pop("id")
+    #    return batch
 
     raw_datasets_features = list(next(iter(raw_datasets.values())).features.keys())
     file_ids_dataset = IterableDatasetDict() if data_args.streaming else DatasetDict()
     for split in raw_datasets:
         file_ids_dataset[split] = raw_datasets[split][id_column_name]
+    
     if data_args.streaming:
         with accelerator.main_process_first():
             vectorized_datasets = raw_datasets.map(prepare_dataset, remove_columns=raw_datasets_features)
     else:
         with accelerator.main_process_first():
             # Rename id to original_id
-            raw_datasets = raw_datasets.map(rename_id_column)
+            #raw_datasets = raw_datasets.map(rename_id_column)
+            
             # Vecotrize dataset, and keep all columns from original
             vectorized_datasets = raw_datasets.map(
                 prepare_dataset,
@@ -751,6 +754,8 @@ def main():
                 num_proc=num_workers,
                 desc="preprocess dataset",
             )
+            # Replace raw_datasets with vectorized_datasets
+            # raw_datasets = vectorized_datasets
 
     # for large datasets it is advised to run the preprocessing on a
     # single machine first with `args.preprocessing_only` since there will mostly likely
